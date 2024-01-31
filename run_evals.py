@@ -304,7 +304,7 @@ def get_parser():
     aa("--batch_size", type=int, default=32)
 
     group = parser.add_argument_group('Experiments parameters')
-    aa("--output_dir", type=str, default="output/", help="Output directory for logs and images (Default: /output)")
+    aa("--output_dir", type=str, default="output/", help="Output directory for logs and images, when doing eval images (Default: /output)")
     aa("--seed", type=int, default=0)
     aa("--debug", type=utils.bool_inst, default=False, help="Debug mode")
 
