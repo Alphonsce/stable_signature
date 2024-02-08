@@ -30,6 +30,9 @@ from ldm.models.autoencoder import AutoencoderKL
 from ldm.models.diffusion.ddpm import LatentDiffusion
 from loss.loss_provider import LossProvider
 
+import wandb
+from tqdm import tqdm
+
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 
@@ -66,6 +69,9 @@ def get_parser():
     group = parser.add_argument_group('Logging and saving freq. parameters')
     aa("--log_freq", type=int, default=10, help="Logging frequency (in steps)")
     aa("--save_img_freq", type=int, default=1000, help="Frequency of saving generated images (in steps)")
+    aa('--with_tracking', action='store_true')
+    aa('--project_name', default='watermark_attacks')
+    aa('--run_name', default='test')
 
     group = parser.add_argument_group('Experiments parameters')
     aa("--num_keys", type=int, default=1, help="Number of fine-tuned checkpoints to generate")
@@ -77,6 +83,10 @@ def get_parser():
 
 
 def main(params):
+    if params.with_tracking:
+        wandb_run = wandb.init(project=params.project_name, name=params.run_name, tags=['tree_ring_watermark'])
+    else:
+        wandb_run = None
 
     # Set seeds for reproductibility 
     torch.manual_seed(params.seed)
@@ -221,8 +231,8 @@ def main(params):
         # Training loop
         print(f'>>> Training...')
                 
-        train_stats = train(train_loader, optimizer, loss_w, loss_i, ldm_ae, ldm_decoder, msg_decoder, vqgan_to_imnet, key, params)
-        val_stats = val(val_loader, ldm_ae, ldm_decoder, msg_decoder, vqgan_to_imnet, key, params)
+        train_stats = train(train_loader, optimizer, loss_w, loss_i, ldm_ae, ldm_decoder, msg_decoder, vqgan_to_imnet, key, params, wandb_run)
+        val_stats = val(val_loader, ldm_ae, ldm_decoder, msg_decoder, vqgan_to_imnet, key, params, wandb_run)
         log_stats = {'key': key_str,
                 **{f'train_{k}': v for k, v in train_stats.items()},
                 **{f'val_{k}': v for k, v in val_stats.items()},
@@ -241,7 +251,7 @@ def main(params):
             f.write(os.path.join(params.output_dir, f"checkpoint_{ii_key:03d}.pth") + "\t" + key_str + "\n")
         print('\n')
 
-def train(data_loader: Iterable, optimizer: torch.optim.Optimizer, loss_w: Callable, loss_i: Callable, ldm_ae: AutoencoderKL, ldm_decoder:AutoencoderKL, msg_decoder: nn.Module, vqgan_to_imnet:nn.Module, key: torch.Tensor, params: argparse.Namespace):
+def train(data_loader: Iterable, optimizer: torch.optim.Optimizer, loss_w: Callable, loss_i: Callable, ldm_ae: AutoencoderKL, ldm_decoder:AutoencoderKL, msg_decoder: nn.Module, vqgan_to_imnet:nn.Module, key: torch.Tensor, params: argparse.Namespace, wandb_run: wandb.Run):
     header = 'Train'
     metric_logger = utils.MetricLogger(delimiter="  ")
     ldm_decoder.decoder.train()
@@ -297,12 +307,15 @@ def train(data_loader: Iterable, optimizer: torch.optim.Optimizer, loss_w: Calla
             save_image(torch.clamp(utils_img.unnormalize_vqgan(imgs),0,1), os.path.join(params.imgs_dir, f'{ii:03}_train_orig.png'), nrow=8)
             save_image(torch.clamp(utils_img.unnormalize_vqgan(imgs_d0),0,1), os.path.join(params.imgs_dir, f'{ii:03}_train_d0.png'), nrow=8)
             save_image(torch.clamp(utils_img.unnormalize_vqgan(imgs_w),0,1), os.path.join(params.imgs_dir, f'{ii:03}_train_w.png'), nrow=8)
+
+        if params.with_tracking:
+            wandb_run.log({'Train_cycle': log_stats})
     
     print("Averaged {} stats:".format('train'), metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 @torch.no_grad()
-def val(data_loader: Iterable, ldm_ae: AutoencoderKL, ldm_decoder: AutoencoderKL, msg_decoder: nn.Module, vqgan_to_imnet:nn.Module, key: torch.Tensor, params: argparse.Namespace):
+def val(data_loader: Iterable, ldm_ae: AutoencoderKL, ldm_decoder: AutoencoderKL, msg_decoder: nn.Module, vqgan_to_imnet:nn.Module, key: torch.Tensor, params: argparse.Namespace, wandb_run: wandb.Run):
     header = 'Eval'
     metric_logger = utils.MetricLogger(delimiter="  ")
     ldm_decoder.decoder.eval()
@@ -344,8 +357,12 @@ def val(data_loader: Iterable, ldm_ae: AutoencoderKL, ldm_decoder: AutoencoderKL
             word_accs = (bit_accs == 1) # b
             log_stats[f'bit_acc_{name}'] = torch.mean(bit_accs).item()
             log_stats[f'word_acc_{name}'] = torch.mean(word_accs.type(torch.float)).item()
+
         for name, loss in log_stats.items():
             metric_logger.update(**{name:loss})
+
+        if params.with_tracking:
+            wandb_run.log({'Val_cycle': log_stats})
 
         if ii % params.save_img_freq == 0:
             save_image(torch.clamp(utils_img.unnormalize_vqgan(imgs),0,1), os.path.join(params.imgs_dir, f'{ii:03}_val_orig.png'), nrow=8)
